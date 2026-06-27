@@ -1,5 +1,7 @@
 # Geometric Neuron v10 — The Skew Operator as an EC→Hippocampus Loop
 
+![pic](pic.png)
+
 ### Grid receptive-fields, a theta-gated sweep, and the arrow of time, read live off a sensory surface
 
 **PerceptionLab / Antti Luode, with Claude. Helsinki, June 2026.**
