@@ -1,7 +1,5 @@
 # Geometric Neuron v10 — The Skew Operator as an EC→Hippocampus Loop
 
-![pic](pic.png)
-
 ### Grid receptive-fields, a theta-gated sweep, and the arrow of time, read live off a sensory surface
 
 **PerceptionLab / Antti Luode, with Claude. Helsinki, June 2026.**
@@ -139,6 +137,7 @@ and closes the prospective loop the offline tour could not.
 ```
 skew_core.py         skew_islands() + project_chirality() + island_velocity() + ThetaSweep
                      — the v9 read path on a sliding window, plus the cortical_loop sweep
+koopman_core.py      KoopmanForecaster — full S+A operator on a Takens lift (the forecaster)
 skew_microscope.py   the live EC->hippocampus instrument (camera -> grid RFs -> islands
                      -> theta sweep) and a headless --selftest
 README.md            this document
@@ -200,6 +199,39 @@ geometric-dysrhythmia result (cross-band eigenmode decoupling `p = 0.007`)
 remains the strongest real result in the program and depends on nothing here.
 
 ---
+
+## 6b. The forecaster: full operator, dual horizon, honest surprise
+
+The sweep is the *arrow* of prediction (skew half only). Actual forecasting needs
+the **full** operator `C = S + A` — rotation *and* decay/power — on a Takens lift,
+where a nonlinear trajectory unrolls toward linearity (Koopman). `koopman_core.py`
+fits a reduced-DMD one-step operator on the delay-embedded window and iterates it.
+
+What the head-to-head measures (`koopman_core.py --selftest`), not asserts:
+
+| horizon | Koopman (S+A on lift) | persistence (copy now) | winner |
+|---|---|---|---|
+| 1 | high (smooths noise) | low (noise for free) | **persistence** |
+| 10 | ~flat | climbing | ~tie |
+| 20 | ~flat | high | **Koopman** |
+| 40 | ~flat | high | **Koopman** |
+
+Persistence wins the micro-step — it copies the present, getting the noise free,
+and is blind to the future. Koopman wins the macro-horizon — it captures the
+global trajectory, and its error stays nearly flat out to 40+ steps. The crossover
+(~10-20 frames) is real and reproduced. Neither "wins" outright; they own
+different horizons, which is the honest finding.
+
+**Surprise** is therefore the *long-horizon* Koopman error, not the one-step
+error. Measured on a stream whose underlying dynamics change mid-run: surprise sits
+flat during stable dynamics, **spikes ~3x at the structural break**, and settles
+as the forecaster re-fits the new physics. The per-frame noise floor is ~20x below
+the stable surprise level, so jitter never triggers it. A high one-step error is
+noise; a high twenty-step error means the physics of the scene changed.
+
+In the instrument: the **green** cone is the theta sweep (skew arrow, short
+look-ahead); the **amber** cone is the full Koopman forecast (long-range
+trajectory); the **red** flash fires only when the long-range forecast breaks.
 
 ## 7. The next builds (named, not claimed)
 

@@ -28,6 +28,7 @@ import time
 import numpy as np
 
 from skew_core import skew_islands, project_chirality, island_velocity, ThetaSweep
+from koopman_core import KoopmanForecaster
 
 
 # ----------------------------------------------------------------------
@@ -89,6 +90,13 @@ def run_gui():
             self.flip_flash = 0
             self.sweep = ThetaSweep(theta_period=15, horizon=14)   # the hippocampal loop
             self.motion_level = 0.0
+            # the full-operator forecaster (S+A on a Takens lift) — the long-range cone
+            self.koop = KoopmanForecaster(d=12, rank=18)
+            self.koop_horizon = 24
+            self.pred_log = {}            # t -> predicted channel frame, for surprise scoring
+            self.surprise = 0.0
+            self.surprise_base = 0.05
+            self.surprise_flash = 0
 
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
@@ -132,6 +140,10 @@ def run_gui():
                                      fg="#888", bg="#0a0f1c", font=("Consolas", 11)); self.lbl_flip.pack()
             self.lbl_sweep = tk.Label(left, text="theta sweep: idle",
                                       fg="#888", bg="#0a0f1c", font=("Consolas", 11)); self.lbl_sweep.pack()
+            self.lbl_koop = tk.Label(left, text="koopman forecast: warming up",
+                                     fg="#888", bg="#0a0f1c", font=("Consolas", 11)); self.lbl_koop.pack(pady=(2, 0))
+            self.surp = tk.Canvas(left, width=430, height=26, bg="#020208", highlightthickness=0)
+            self.surp.pack(padx=20, pady=(4, 0))
 
             bf = tk.Frame(left, bg="#0a0f1c"); bf.pack(pady=10)
             tk.Button(bf, text="LOCK PLANE", command=self.lock_plane, bg="#10331f", fg="#00ffcc",
@@ -153,7 +165,7 @@ def run_gui():
             tk.Scale(cf, from_=6, to=40, resolution=1, variable=self.theta_var, orient="horizontal",
                      bg="#0a0f1c", fg="#ffaa00", highlightthickness=0,
                      command=lambda *_: setattr(self.sweep, "theta", self.theta_var.get())).pack(fill="x")
-            tk.Label(left, text="LOCK onto a moving object: it becomes a grid cell (RF + rate).\nThe green cone is the hippocampal theta sweep \u2014 the look-ahead.\nReverse the motion: the sweep flips. Cover the lens: it dead-reckons.",
+            tk.Label(left, text="GREEN cone = theta sweep (held grid cell, short look-ahead).\nAMBER cone = full S+A Koopman forecast (long-range trajectory).\nRED surprise flash = the long-range prediction broke (a real anomaly).",
                      fg="#667", bg="#0a0f1c", font=("Consolas", 9), justify="left").pack(pady=(8, 0), padx=20, anchor="w")
 
             self.right = tk.Frame(body, bg="#000"); self.right.pack(side="left", fill="both", expand=True)
@@ -170,7 +182,11 @@ def run_gui():
             self.sweep_line, = self.ax.plot([], [], [], lw=2.6, color="#39ff88", alpha=0.9)
             self.sweep_head = self.ax.scatter([], [], [], color="#39ff88", s=40)
             self.now_head = self.ax.scatter([], [], [], color="#ffffff", s=45)
-            self.ax.set_xlim(-2, 2); self.ax.set_ylim(-2, 2); self.ax.set_zlim(-self.W, 14)
+            # the full-operator Koopman forecast: long-range topology (amber), + short persistence tail
+            self.koop_line, = self.ax.plot([], [], [], lw=2.2, color="#ffb020", alpha=0.85)
+            self.koop_head = self.ax.scatter([], [], [], color="#ffb020", s=35)
+            self.persist_line, = self.ax.plot([], [], [], lw=1.6, color="#88aaff", alpha=0.6)
+            self.ax.set_xlim(-2, 2); self.ax.set_ylim(-2, 2); self.ax.set_zlim(-self.W, 26)
             self.ax.set_xlabel("Re z", color="#556"); self.ax.set_ylabel("Im z", color="#556")
             self.canvas = FigureCanvasTkAgg(self.fig, master=self.right)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -180,7 +196,7 @@ def run_gui():
             if W != self.W:
                 nb = np.zeros((NCH, W))
                 m = min(W, self.W); nb[:, -m:] = self.buf[:, -m:]
-                self.buf = nb; self.W = W; self.ax.set_zlim(-W, 14)
+                self.buf = nb; self.W = W; self.ax.set_zlim(-W, 26)
 
         def lock_plane(self):
             isl = skew_islands(self.buf, tau=self.tau_var.get(), n_islands=1)
@@ -237,6 +253,24 @@ def run_gui():
                                                  fill=fill, outline="#111")
                 self.rf.create_text(ox + GW * cell / 2, pad + GH * cell + 8,
                                     text=f"RF{k}", fill=col_pos, font=("Consolas", 8))
+
+        def spectrum_color(self):
+            if self.surprise_flash > 0:
+                return "#ff4444"
+            ratio = self.surprise / (self.surprise_base + 1e-9)
+            return "#ffb020" if ratio > 1.8 else "#39ff88"
+
+        def _draw_surprise(self):
+            self.surp.delete("all")
+            ratio = min(4.0, self.surprise / (self.surprise_base + 1e-9))
+            w = int(420 * ratio / 4.0)
+            col = "#ff4444" if self.surprise_flash > 0 else ("#ffb020" if ratio > 1.8 else "#39ff88")
+            self.surp.create_rectangle(5, 5, 5 + w, 21, fill=col, outline="")
+            self.surp.create_line(5 + 420 * 1.8 / 4.0, 2, 5 + 420 * 1.8 / 4.0, 24, fill="#666", dash=(2, 2))
+            self.surp.create_text(215, 13, text="SURPRISE  (long-range forecast break)",
+                                  fill="#ccd", font=("Consolas", 8))
+            if self.surprise_flash > 0:
+                self.surprise_flash -= 1
 
         def _align(self, islands):
             """stabilize display: sign/order-align this frame's planes to the last."""
@@ -295,6 +329,49 @@ def run_gui():
                                          fg=CYAN if d['L'] >= 0 else MAGENTA)
                 self._draw_spectrum(islands)
                 self._draw_rf(islands)
+
+                # ---------------- the full-operator Koopman forecast ----------------
+                # S+A on a Takens lift: the long-range trajectory (amber cone), scored
+                # for surprise against what actually arrives `horizon` frames later.
+                t_now = getattr(self, "_frame", 0); self._frame = t_now + 1
+                Hh = self.koop_horizon
+                fc = self.koop.fit(self.buf).forecast(Hh)
+                # score surprise: did the forecast made Hh frames ago match the present?
+                past = self.pred_log.pop(t_now, None)
+                if past is not None:
+                    self.surprise = float(np.mean((past - self.buf[:, -1]) ** 2))
+                    self.surprise_base = 0.98 * self.surprise_base + 0.02 * self.surprise
+                    if self.surprise > 3.0 * self.surprise_base + 1e-4:
+                        self.surprise_flash = 10
+                if fc is not None:
+                    self.pred_log[t_now + Hh] = fc[:, -1].copy()
+                    if len(self.pred_log) > Hh + 5:                # bound memory
+                        for k in list(self.pred_log)[:-Hh - 5]: self.pred_log.pop(k, None)
+
+                # project the Koopman forecast + a persistence tail onto the dominant plane
+                if islands and fc is not None:
+                    u0, v0 = islands[0]['u'], islands[0]['v']
+                    mu = self.buf.mean(1)
+                    def to_plane(frame):
+                        fc_c = frame - mu
+                        return (fc_c @ u0), -(fc_c @ v0)
+                    kx, ky = [], []
+                    for h in range(Hh):
+                        a, b = to_plane(fc[:, h]); kx.append(a); ky.append(b)
+                    self.koop_line.set_data(kx, ky)
+                    self.koop_line.set_3d_properties(np.arange(1, Hh + 1))
+                    self.koop_head._offsets3d = ([kx[-1]], [ky[-1]], [Hh])
+                    # persistence tail: the present frame held flat for the first few steps
+                    pa, pb = to_plane(self.buf[:, -1])
+                    self.persist_line.set_data([pa, pa], [pb, pb])
+                    self.persist_line.set_3d_properties([0, 4])
+                    sp = self.spectrum_color()
+                    self.lbl_koop.config(text=f"koopman forecast H={Hh}  surprise={self.surprise:.4f}",
+                                         fg=sp)
+                else:
+                    self.koop_line.set_data([], []); self.koop_line.set_3d_properties([])
+                    self.koop_head._offsets3d = ([], [], [])
+                self._draw_surprise()
 
                 # ---------------- the hippocampal loop ----------------
                 # held grid cell -> theta-gated predict/correct -> forward sweep
