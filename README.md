@@ -1,5 +1,7 @@
 # Geometric Neuron v10 — The Skew Operator, Live
 
+![pic](pic.png)
+
 ### Reading the islands off a sensory surface, causally, in real time
 
 **PerceptionLab / Antti Luode, with Claude. Helsinki, June 2026.**
