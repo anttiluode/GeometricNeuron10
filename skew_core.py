@@ -89,3 +89,55 @@ def project_chirality(R, u, v, tau=4):
     if len(z) <= tau:
         return 0.0
     return float((z[tau:] * np.conj(z[:-tau])).imag.mean())
+
+
+# ----------------------------------------------------------------------
+# v10 full-loop additions: the EC->hippocampus predict/correct sweep
+# ----------------------------------------------------------------------
+def island_velocity(z, tau=4):
+    """Signed angular velocity (rad/step) of a plane coordinate z(t), from the
+    quadrature cross-time product -- the same mechanism as L = Im(z z*_lag),
+    but as a rate. This is the held island's 'speed of travel' across its RF."""
+    if len(z) <= tau:
+        return 0.0
+    cr = (z[tau:] * np.conj(z[:-tau])).mean()
+    return float(np.angle(cr)) / tau
+
+
+class ThetaSweep:
+    """cortical_loop's predict-during-cycle / correct-at-trough, applied to a
+    HELD island's own phase. Within a theta cycle the phase dead-reckons forward
+    at the last held velocity (the Moser look-ahead); at the trough it is
+    corrected toward the freshly observed phase. When sensory motion drops out
+    the velocity is HELD and the sweep keeps projecting -- dead-reckoning."""
+    def __init__(self, theta_period=15, gain=0.35, vel_smooth=0.3, horizon=12):
+        self.theta = int(theta_period)   # steps per theta cycle (septal clock)
+        self.gain = gain                 # CA1 correction strength at the trough
+        self.alpha = vel_smooth          # velocity low-pass
+        self.horizon = horizon           # steps projected ahead in the sweep
+        self.phi = 0.0                   # current integrated phase estimate
+        self.v = 0.0                     # held angular velocity
+        self.step = 0
+        self.locked = False
+
+    def reset(self, phi0, v0):
+        self.phi = float(phi0); self.v = float(v0); self.step = 0; self.locked = True
+
+    def update(self, z_obs, v_obs, has_motion):
+        """Advance one frame. z_obs: latest complex coord on the held plane.
+        v_obs: freshly measured velocity. has_motion: was there input this frame.
+        Returns (phi_estimate, sweep_phases, corrected_this_frame)."""
+        if not self.locked:
+            return 0.0, np.array([]), False
+        if has_motion:
+            self.v = (1 - self.alpha) * self.v + self.alpha * v_obs   # update velocity
+        # else: HOLD self.v  (dead-reckoning through a motion dropout)
+        self.phi += self.v                                            # path-integrate phase
+        corrected = False
+        if has_motion and (self.step % self.theta == 0):             # theta trough: correct
+            err = np.angle(np.exp(1j * (np.angle(z_obs) - self.phi)))
+            self.phi += self.gain * err
+            corrected = True
+        self.step += 1
+        sweep = self.phi + self.v * np.arange(1, self.horizon + 1)    # forward look-ahead
+        return self.phi, sweep, corrected

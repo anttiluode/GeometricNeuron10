@@ -27,7 +27,7 @@ import sys
 import time
 import numpy as np
 
-from skew_core import skew_islands, project_chirality
+from skew_core import skew_islands, project_chirality, island_velocity, ThetaSweep
 
 
 # ----------------------------------------------------------------------
@@ -77,16 +77,18 @@ def run_gui():
     class SkewMicroscope:
         def __init__(self, root):
             self.root = root
-            root.title("Skew Microscope — the geometric neuron from inside")
+            root.title("Skew Microscope v10 — EC\u2192Hippocampus loop (grid RFs, theta sweep)")
             root.geometry("1600x950"); root.configure(bg="#05050a")
 
             self.fs = 30.0
             self.W = 90                                  # window length (frames)
             self.buf = np.zeros((NCH, self.W))           # the multichannel stream
             self.prev_gray = None
-            self.lock_u = None; self.lock_v = None       # held reference plane
+            self.lock_u = None; self.lock_v = None       # held reference plane (grid RF)
             self.lock_L0 = None                          # sign at lock time
             self.flip_flash = 0
+            self.sweep = ThetaSweep(theta_period=15, horizon=14)   # the hippocampal loop
+            self.motion_level = 0.0
 
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
@@ -100,7 +102,7 @@ def run_gui():
         # ---------------- UI ----------------
         def _build_ui(self):
             hdr = tk.Frame(self.root, bg="#0a0f1c", height=56); hdr.pack(fill="x")
-            tk.Label(hdr, text="SKEW MICROSCOPE  //  live eigenplanes of A\u03c4  (the islands, from a camera)",
+            tk.Label(hdr, text="SKEW MICROSCOPE v10  //  EC grid receptive-fields  \u2192  hippocampal theta sweep",
                      font=("Consolas", 14, "bold"), fg="#00ffcc", bg="#0a0f1c").pack(side="left", padx=20, pady=12)
 
             body = tk.Frame(self.root, bg="#05050a"); body.pack(fill="both", expand=True, padx=5, pady=5)
@@ -119,10 +121,17 @@ def run_gui():
             self.spec = tk.Canvas(left, width=430, height=120, bg="#020208", highlightthickness=0)
             self.spec.pack(padx=20)
 
+            tk.Label(left, text="GRID RECEPTIVE FIELDS  u\u2c7c on the receptor sheet  (EC \u2014 the 'where')",
+                     fg="#ffaa00", bg="#0a0f1c", font=("Consolas", 9, "bold")).pack(pady=(12, 2))
+            self.rf = tk.Canvas(left, width=430, height=96, bg="#020208", highlightthickness=0)
+            self.rf.pack(padx=20)
+
             self.lbl_chir = tk.Label(left, text="dominant island  \u03c9=--  L=--",
                                      fg="#00ffcc", bg="#0a0f1c", font=("Consolas", 12)); self.lbl_chir.pack(pady=(12, 2))
             self.lbl_flip = tk.Label(left, text="reference plane: not locked",
                                      fg="#888", bg="#0a0f1c", font=("Consolas", 11)); self.lbl_flip.pack()
+            self.lbl_sweep = tk.Label(left, text="theta sweep: idle",
+                                      fg="#888", bg="#0a0f1c", font=("Consolas", 11)); self.lbl_sweep.pack()
 
             bf = tk.Frame(left, bg="#0a0f1c"); bf.pack(pady=10)
             tk.Button(bf, text="LOCK PLANE", command=self.lock_plane, bg="#10331f", fg="#00ffcc",
@@ -139,7 +148,12 @@ def run_gui():
             self.tau_var = tk.IntVar(value=4)
             tk.Scale(cf, from_=1, to=15, resolution=1, variable=self.tau_var, orient="horizontal",
                      bg="#0a0f1c", fg="#00ffcc", highlightthickness=0).pack(fill="x")
-            tk.Label(left, text="LOCK a plane, then sweep your hand left, then right.\nThe dominant L flips sign \u2014 that is the v9 reversal, live.",
+            tk.Label(cf, text="Theta period (frames/cycle):", fg="#aaa", bg="#0a0f1c").pack(anchor="w", pady=(10, 0))
+            self.theta_var = tk.IntVar(value=15)
+            tk.Scale(cf, from_=6, to=40, resolution=1, variable=self.theta_var, orient="horizontal",
+                     bg="#0a0f1c", fg="#ffaa00", highlightthickness=0,
+                     command=lambda *_: setattr(self.sweep, "theta", self.theta_var.get())).pack(fill="x")
+            tk.Label(left, text="LOCK onto a moving object: it becomes a grid cell (RF + rate).\nThe green cone is the hippocampal theta sweep \u2014 the look-ahead.\nReverse the motion: the sweep flips. Cover the lens: it dead-reckons.",
                      fg="#667", bg="#0a0f1c", font=("Consolas", 9), justify="left").pack(pady=(8, 0), padx=20, anchor="w")
 
             self.right = tk.Frame(body, bg="#000"); self.right.pack(side="left", fill="both", expand=True)
@@ -152,7 +166,11 @@ def run_gui():
             self.island_lines = []
             for _ in range(NISL):
                 ln, = self.ax.plot([], [], [], lw=2.0, alpha=0.85); self.island_lines.append(ln)
-            self.ax.set_xlim(-2, 2); self.ax.set_ylim(-2, 2); self.ax.set_zlim(-self.W, 0)
+            # the hippocampal theta sweep: a forward look-ahead projected ABOVE the present (z>0)
+            self.sweep_line, = self.ax.plot([], [], [], lw=2.6, color="#39ff88", alpha=0.9)
+            self.sweep_head = self.ax.scatter([], [], [], color="#39ff88", s=40)
+            self.now_head = self.ax.scatter([], [], [], color="#ffffff", s=45)
+            self.ax.set_xlim(-2, 2); self.ax.set_ylim(-2, 2); self.ax.set_zlim(-self.W, 14)
             self.ax.set_xlabel("Re z", color="#556"); self.ax.set_ylabel("Im z", color="#556")
             self.canvas = FigureCanvasTkAgg(self.fig, master=self.right)
             self.canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -162,17 +180,22 @@ def run_gui():
             if W != self.W:
                 nb = np.zeros((NCH, W))
                 m = min(W, self.W); nb[:, -m:] = self.buf[:, -m:]
-                self.buf = nb; self.W = W; self.ax.set_zlim(-W, 0)
+                self.buf = nb; self.W = W; self.ax.set_zlim(-W, 14)
 
         def lock_plane(self):
             isl = skew_islands(self.buf, tau=self.tau_var.get(), n_islands=1)
             if isl:
                 self.lock_u, self.lock_v = isl[0]['u'], isl[0]['v']
                 self.lock_L0 = np.sign(isl[0]['L'])
-                self.lbl_flip.config(text="reference plane: LOCKED  (sweep to test)", fg="#00ffcc")
+                # seed the hippocampal loop with this island's current phase + velocity
+                z = isl[0]['z']
+                v0 = island_velocity(z, tau=self.tau_var.get())
+                self.sweep.reset(np.angle(z[-1]), v0)
+                self.lbl_flip.config(text="grid cell LOCKED  (its RF is highlighted)", fg="#00ffcc")
 
         def release_plane(self):
             self.lock_u = self.lock_v = self.lock_L0 = None
+            self.sweep.locked = False
             self.lbl_flip.config(text="reference plane: not locked", fg="#888")
 
         # ---------------- per-frame ----------------
@@ -189,7 +212,31 @@ def run_gui():
                 for c in range(GW):
                     patch = mot[r * ph:(r + 1) * ph, c * pw:(c + 1) * pw]
                     v = float(patch.mean()); out[r * GW + c] = v; rec_img[r, c] = v
+            self.motion_level = float(mot.mean())
             return out, rec_img
+
+        def _draw_rf(self, islands):
+            """paint each top island's eigenvector u_j back onto the 6x4 grid:
+            its spatial receptive field (the EC 'where' for that grid cell)."""
+            self.rf.delete("all")
+            cell = 18; pad = 6; gap = 14
+            for k in range(min(3, len(islands))):
+                u = islands[k]['u']
+                rfmap = u.reshape(GH, GW)
+                rfmap = rfmap / (np.abs(rfmap).max() + 1e-9)
+                ox = 20 + k * (GW * cell + gap)
+                col_pos = CYAN if islands[k]['L'] >= 0 else MAGENTA
+                for r in range(GH):
+                    for c in range(GW):
+                        val = rfmap[r, c]
+                        inten = int(min(255, abs(val) * 255))
+                        hexc = f"{inten:02x}"
+                        fill = (f"#00{hexc}{hexc}" if val >= 0 else f"#{hexc}00{int(inten*0.6):02x}")
+                        self.rf.create_rectangle(ox + c * cell, pad + r * cell,
+                                                 ox + (c + 1) * cell, pad + (r + 1) * cell,
+                                                 fill=fill, outline="#111")
+                self.rf.create_text(ox + GW * cell / 2, pad + GH * cell + 8,
+                                    text=f"RF{k}", fill=col_pos, font=("Consolas", 8))
 
         def _align(self, islands):
             """stabilize display: sign/order-align this frame's planes to the last."""
@@ -247,20 +294,48 @@ def run_gui():
                     self.lbl_chir.config(text=f"dominant island  \u03c9={d['omega']:+.3f}  L={d['L']:+.3f}",
                                          fg=CYAN if d['L'] >= 0 else MAGENTA)
                 self._draw_spectrum(islands)
+                self._draw_rf(islands)
 
-                # held-plane chirality + flip detector
+                # ---------------- the hippocampal loop ----------------
+                # held grid cell -> theta-gated predict/correct -> forward sweep
                 if self.lock_u is not None:
                     L = project_chirality(self.buf, self.lock_u, self.lock_v, tau=tau)
                     s = np.sign(L)
                     if abs(L) > 1e-4 and s != self.lock_L0:
                         self.flip_flash = 8; self.lock_L0 = s
-                    spin = "spin +  (one way)" if L >= 0 else "spin \u2212  (reversed)"
+
+                    # the held island's live complex coordinate + velocity
+                    Rc = self.buf - self.buf.mean(1, keepdims=True)
+                    z_held = (Rc.T @ self.lock_u) - 1j * (Rc.T @ self.lock_v)
+                    v_obs = island_velocity(z_held, tau=tau)
+                    has_motion = self.motion_level > 8e-4
+                    phi, sweep_ph, corrected = self.sweep.update(z_held[-1], v_obs, has_motion)
+
+                    # render the forward sweep as a green cone ABOVE the present (z>0)
+                    amp = max(0.4, float(np.abs(z_held[-20:]).mean()))
+                    sx = amp * np.cos(sweep_ph); sy = amp * np.sin(sweep_ph)
+                    sz = np.arange(1, len(sweep_ph) + 1)
+                    self.sweep_line.set_data(sx, sy); self.sweep_line.set_3d_properties(sz)
+                    self.sweep_head._offsets3d = ([sx[-1]], [sy[-1]], [sz[-1]])
+                    nx, ny = amp * np.cos(phi), amp * np.sin(phi)
+                    self.now_head._offsets3d = ([nx], [ny], [0.0])
+
+                    spin = "spin +" if L >= 0 else "spin \u2212"
                     if self.flip_flash > 0:
                         self.lbl_flip.config(text=f"\u26a1 CHIRALITY FLIPPED  L={L:+.3f}", fg="#ffe14d")
                         self.flip_flash -= 1
                     else:
-                        self.lbl_flip.config(text=f"held plane L={L:+.3f}   {spin}",
+                        self.lbl_flip.config(text=f"grid cell  L={L:+.3f}  {spin}",
                                              fg=CYAN if L >= 0 else MAGENTA)
+                    gate = "CORRECT (theta trough)" if corrected else ("PREDICT" if has_motion else "DEAD-RECKON (no input)")
+                    swdir = "look-ahead +" if self.sweep.v >= 0 else "look-ahead \u2212"
+                    self.lbl_sweep.config(text=f"theta sweep: {gate}   v={self.sweep.v:+.3f}  {swdir}",
+                                          fg="#39ff88" if has_motion else "#ffaa00")
+                else:
+                    self.sweep_line.set_data([], []); self.sweep_line.set_3d_properties([])
+                    self.sweep_head._offsets3d = ([], [], [])
+                    self.now_head._offsets3d = ([], [], [])
+                    self.lbl_sweep.config(text="theta sweep: idle  (lock a grid cell)", fg="#888")
 
                 self.ax.view_init(elev=18, azim=(time.time() * 12) % 360)
                 self.canvas.draw_idle()
